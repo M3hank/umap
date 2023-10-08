@@ -1,48 +1,41 @@
 # UrlMap
-**A sophisticated URL filtering tool, written in Go, that effectively identifies and categorizes URLs based on intriguing file extensions and query parameters**
 
-### Installation
+**UrlMap** is a sophisticated URL filtering tool crafted in Go. It intelligently filters urls discarding uninteresting content.
+
+## Installation
 ```
 go install github.com/M3hank/umap@latest
 ```
-### Basic Usage
-**At its most basic, UrlMap can accept a list of URLs via stdin (Standard Input), when used in its most basic mode without any command-line arguments, UrlMap will filter URLs based on interesting file extensions, query parameters & performs de-duplication.:** 
+
+Feed **UrlMap** a list of URLs via stdin, and it will intelligently filter out repetitive URLs, emphasizing the more dynamic or intriguing ones.
+
+**Before & After Filtering:**
+
+| Total URLs | Filtered URLs |
+|:-------------:|:-------------:|
+| ![All URLs used for testing](https://github.com/M3hank/umap/assets/70057473/deb37664-b6ec-4103-8282-cf54ce4258c8) | ![URLs filtered using Umap](https://github.com/M3hank/umap/assets/70057473/07256b81-19e3-480d-90e5-30e53675e2e6) |
+
+### Commands:
 ```
 cat urls.txt | umap
 ```
-**Umap can be easily integrated with other tools.**
+
+For integrating with other tools:
 ```
 echo "www.example.com" | waybackurls | umap
 ```
----
-### Available Options
 
-UrlMap provides the following command-line options:
+## Options
 
-```-vuln```: This option filters URLs based on known vulnerable query parameters such as 'id', 'file', 'page', 'path', etc. This can help in quickly identifying potentially risky URLs.
-
-```
-cat urls.txt | umap -vuln
-```
-![umap -vuln](https://github.com/M3hank/umap/assets/70057473/e3703dc7-64c9-4a2f-a7ce-161f1e82f648)
----
-
-```-params```: Use this option to display only URLs that contain query parameters. This can be handy when you're interested in web pages that are likely to display different content based on the parameters.
+Spotlight URLs with parameters using the `-params` flag:
 ```
 cat urls.txt | umap -params
 ```
-![umap -params](https://github.com/M3hank/umap/assets/70057473/4f74671c-9774-4162-aced-522ca702a5a8)
----
 
-```-ext```: With this option, UrlMap will display only the URLs that have an interesting file extension (such as .php, .js, .sql, etc.) in their path. It's useful when you're interested in identifying scripts, configuration files, or other potentially interesting resources.
-```
-cat urls.txt | umap -ext
-```
-![umap -ext](https://github.com/M3hank/umap/assets/70057473/44782c46-19ca-4a50-aa0a-c7c5929a51df)
----
+**Parameter-focused URLs:**
 
-
+![Parameters](https://github.com/M3hank/umap/assets/70057473/13c42cd9-673c-4afc-8345-bc73e52a4e34)
 
 ## Contributing
 
-Contributions are always welcome!
+Contributions are always welcome! Enhance **UrlMap** by contributing code, do
