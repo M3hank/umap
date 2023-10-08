@@ -8,137 +8,116 @@ import (
 	"os"
 	"regexp"
 	"strings"
-	"sync"
 )
 
 var (
-	interestingExtensions = map[string]bool{
-		".js": true, ".html": true,".php": true, ".py": true, ".rb": true, ".sql": true, ".bak": true, ".cfg": true,
-		".yml": true, ".env": true, ".asp": true, ".aspx": true, ".jsp": true, ".xls": true, ".mdb": true,
-		".db": true, ".log": true, ".tmp": true, ".swp": true, ".ini": true, ".conf": true, ".htaccess": true, ".htpasswd": true,
-		".git": true, ".svn": true, ".tar": true, ".zip": true, ".rar": true, ".7z": true, ".htm": true, ".txt": true,
-		".cfm": true, ".hta": true, ".inc": true, ".jhtml": true, ".nsf": true, ".pcap": true, ".php2": true,
-		".php3": true, ".php4": true, ".php5": true, ".php6": true, ".php7": true, ".phps": true, ".pht": true, ".phtml": true,
-		".sh": true, ".shtml": true, ".swf": true, ".xml": true, ".bzip2": true, ".bz2": true, ".gz": true,
+	urlMappings   = make(map[string]map[string][]map[string]string)
+	seenParameters = make(map[string]struct{})
+	seenPatterns   = make(map[string]struct{})
+	reInteger      = regexp.MustCompile(`/\d+([?/]|$)`)
+	reContentCheck = regexp.MustCompile(`(post|article|blog)s?|docs|system|support/|/(\d{4}|pages?)/\d+/`)
+	staticExtensions = map[string]struct{}{
+	    "css": {}, "svg": {}, "png": {}, "mp3": {}, "jpg": {}, "pdf": {}, "woff2": {}, "bmp": {}, "ico": {},
+		"mp4": {}, "woff": {}, "jpeg": {}, "ttf": {}, "avi": {}, "webp": {}, "eot": {}, "otf": {}, "gif": {},
 	}
-	vulnerableParams = map[string]bool{
-		"file": true, "view": true, "home": true, "route": true, "load": true, "name": true, "doc": true,
-		"page": true, "path": true, "template": true, "lang": true, "redirect": true, "content": true,
-		"include": true, "id": true, "user": true, "search": true, "login": true, "value": true,
-		"page_id": true, "author": true, "number": true, "query": true, "date": true, "order": true,
-		"info": true, "prod": true, "article": true, "entry": true, "cmd": true, "exec": true,
-		"run": true, "execute": true, "shell": true, "command": true, "debug": true, "code": true,
-		"arg": true, "bash": true, "payload": true, "input": true, "test": true, "data": true,
-		"ref": true, "comment": true, "msg": true, "url": true, "link": true, "next": true,
-		"rurl": true, "callback": true, "out": true, "goto": true, "jump": true, "return": true,
-		"continue": true, "back": true, "forward": true, "dest": true, "img_url": true, "source": true,
-		"host": true, "uri": true, "target": true, "site": true, "proxy": true, "refer": true,
-		"account": true, "member": true, "usergroup": true, "key": true, "filetype": true, "dir": true,
-	}
-	vuln     = flag.Bool("vuln", false, "Vulnerable parameters")
-	param    = flag.Bool("params", false, "Url with Parameters")
-	onlyPath = flag.Bool("ext", false, "Show urls with interesting extensions")
-	urlChan  = make(chan string)
-	visited  = make(map[string]bool)
-	visitedMu = &sync.RWMutex{}
-	wg       = &sync.WaitGroup{}
-	interestingExtensionsRegex *regexp.Regexp
 )
 
-func init() {
-	pattern := "("
-	for ext := range interestingExtensions {
-		pattern += `\` + ext + "|"
+var parametersFlag = flag.Bool("params", false, "Only output URLs with parameters")
+
+func parametersToDictionary(params string) map[string]string {
+	res := make(map[string]string)
+	for _, pair := range strings.Split(params, "&") {
+		parts := strings.Split(pair, "=")
+		if len(parts) == 2 {
+			res[parts[0]] = parts[1]
+		}
 	}
-	pattern = strings.TrimSuffix(pattern, "|")
-	pattern += ")(\\?|$)"
-	interestingExtensionsRegex = regexp.MustCompile(pattern)
+	return res
+}
+
+func dictionaryToParameters(params map[string]string) string {
+	if len(params) == 0 {
+		return ""
+	}
+	pairs := make([]string, 0, len(params))
+	for k, v := range params {
+		pairs = append(pairs, k+"="+v)
+	}
+	return "?" + strings.Join(pairs, "&")
+}
+
+func compareParameters(originalParams []map[string]string, newParams map[string]string) bool {
+	originalKeys := make(map[string]struct{})
+	for _, params := range originalParams {
+		for k := range params {
+			originalKeys[k] = struct{}{}
+		}
+	}
+	for k := range newParams {
+		if _, exists := originalKeys[k]; !exists {
+			return true
+		}
+	}
+	return false
+}
+
+func hasBadExtension(path string) bool {
+	parts := strings.Split(path, ".")
+	if len(parts) < 2 {
+		return false
+	}
+	extension := parts[len(parts)-1]
+	_, exists := staticExtensions[extension]
+	return exists
+}
+
+func isContentPath(path string) bool {
+	for _, part := range strings.Split(path, "/") {
+		if strings.Count(part, "-") > 3 {
+			return true
+		}
+	}
+	return false
 }
 
 func main() {
 	flag.Parse()
+
 	scanner := bufio.NewScanner(os.Stdin)
-	const concurrency = 1000
-
-	if !*vuln && !*param && !*onlyPath {
-		*vuln = true
-		*param = true
-		*onlyPath = true
-	}
-
-	for i := 0; i < concurrency; i++ {
-		wg.Add(1)
-		go func() {
-			for u := range urlChan {
-				if *vuln {
-					handleVulnerableParams(u)
-				}
-				if *param {
-					handleParams(u)
-				}
-				if *onlyPath {
-					handlePath(u)
-				}
-			}
-			wg.Done()
-		}()
-	}
-
 	for scanner.Scan() {
-		u := scanner.Text()
-		urlChan <- u
-	}
-
-	close(urlChan)
-	wg.Wait()
-
-	if scanner.Err() != nil {
-		fmt.Fprintln(os.Stderr, "reading standard input:", scanner.Err())
-	}
-}
-
-func handleVulnerableParams(u string) {
-	uParsed, err := url.Parse(u)
-	if err != nil {
-		return
-	}
-
-	for p := range uParsed.Query() {
-		if vulnerableParams[p] {
-			printURL(u)
-			break
+		line := scanner.Text()
+		parsed, err := url.Parse(line)
+		if err != nil {
+			continue
+		}
+		host := parsed.Scheme + "://" + parsed.Host
+		if _, exists := urlMappings[host]; !exists {
+			urlMappings[host] = make(map[string][]map[string]string)
+		}
+		params := parametersToDictionary(parsed.RawQuery)
+		path := parsed.Path
+		if hasBadExtension(path) || reContentCheck.MatchString(path) || isContentPath(path) {
+			continue
+		}
+		if _, exists := urlMappings[host][path]; !exists {
+			urlMappings[host][path] = make([]map[string]string, 0)
+		}
+		if compareParameters(urlMappings[host][path], params) {
+			urlMappings[host][path] = append(urlMappings[host][path], params)
 		}
 	}
-}
 
-func handleParams(u string) {
-	uParsed, err := url.Parse(u)
-	if err != nil {
-		return
-	}
-
-	if uParsed.RawQuery != "" {
-		printURL(u)
-	}
-}
-
-func handlePath(u string) {
-	uParsed, err := url.Parse(u)
-	if err != nil {
-		return
-	}
-
-	if interestingExtensionsRegex.FindStringSubmatch(uParsed.Path) != nil {
-		printURL(u)
-	}
-}
-
-func printURL(u string) {
-	visitedMu.Lock()
-	defer visitedMu.Unlock()
-
-	if _, seen := visited[u]; !seen {
-		visited[u] = true
-		fmt.Println(u)
+	for host, paths := range urlMappings {
+		for path, allParams := range paths {
+			if *parametersFlag && len(allParams) == 0 {
+				continue
+			}
+			for _, params := range allParams {
+				fmt.Println(host + path + dictionaryToParameters(params))
+			}
+			if !*parametersFlag && len(allParams) == 0 {
+				fmt.Println(host + path)
+			}
+		}
 	}
 }
