@@ -48,8 +48,17 @@ func paramNamesToString(paramNames map[string]struct{}) string {
 	return strings.Join(keys, "&")
 }
 
+// hasBadExtension checks if the URL path (ignoring query/fragment) has a static file extension.
 func hasBadExtension(pathStr string) bool {
-	extension := strings.TrimPrefix(path.Ext(pathStr), ".")
+	// Use only the path portion — strip any potential query string remnants
+	// path.Ext operates on the last element, so we just need the clean path segment
+	base := path.Base(pathStr)
+	// Strip anything after '?' in case the path itself somehow carries it
+	if idx := strings.Index(base, "?"); idx != -1 {
+		base = base[:idx]
+	}
+	extension := strings.TrimPrefix(path.Ext(base), ".")
+	extension = strings.ToLower(extension)
 	if extension == "" {
 		return false
 	}
@@ -57,9 +66,12 @@ func hasBadExtension(pathStr string) bool {
 	return exists
 }
 
+// isContentPath returns true if any path segment looks like a UUID / slug
+// (more than 4 hyphens). A threshold of 3 was too aggressive and discarded
+// legitimate endpoints like /wp-admin/admin-ajax.php.
 func isContentPath(pathStr string) bool {
 	for _, part := range strings.Split(pathStr, "/") {
-		if strings.Count(part, "-") > 3 {
+		if strings.Count(part, "-") > 4 {
 			return true
 		}
 	}
@@ -69,30 +81,50 @@ func isContentPath(pathStr string) bool {
 func main() {
 	flag.Parse()
 
+	// BUG FIX: Use a larger scanner buffer so very long lines are not silently dropped.
 	scanner := bufio.NewScanner(os.Stdin)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1 MB per line
+
 	for scanner.Scan() {
-		line := scanner.Text()
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+
+		// BUG FIX: Prepend scheme BEFORE parsing, not after.
+		// url.Parse on a scheme-less string like "www.example.com/path"
+		// treats the entire string as a path, leaving Host empty.
+		if !strings.Contains(line, "://") {
+			line = "http://" + line
+		}
+
 		parsed, err := url.Parse(line)
 		if err != nil {
 			continue
 		}
-		if parsed.Scheme == "" {
-			parsed.Scheme = "http"
+
+		// BUG FIX: Skip URLs that have no host after parsing (e.g. bare relative paths).
+		if parsed.Host == "" {
+			continue
 		}
+
 		host := parsed.Scheme + "://" + parsed.Host
 		if _, exists := urlMappings[host]; !exists {
 			urlMappings[host] = make(map[string]map[string]string)
 		}
+
 		pathStr := parsed.Path
 		if hasBadExtension(pathStr) || isContentPath(pathStr) {
 			continue
 		}
+
 		paramNames := parametersToNameSet(parsed.RawQuery)
 		paramNamesStr := paramNamesToString(paramNames)
 		if *parametersFlag && paramNamesStr == "" {
 			// Skip URLs without parameters when -params flag is set
 			continue
 		}
+
 		if _, exists := urlMappings[host][pathStr]; !exists {
 			urlMappings[host][pathStr] = make(map[string]string)
 		}
@@ -102,6 +134,12 @@ func main() {
 			fullURL := parsed.String()
 			urlMappings[host][pathStr][paramNamesStr] = fullURL
 		}
+	}
+
+	// BUG FIX: Check scanner error — previously silently ignored read failures.
+	if err := scanner.Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "umap: error reading input: %v\n", err)
+		os.Exit(1)
 	}
 
 	for _, paths := range urlMappings {
