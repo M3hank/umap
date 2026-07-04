@@ -25,12 +25,13 @@ var parametersFlag = flag.Bool("params", false, "Only output URLs with parameter
 func parametersToNameSet(params string) map[string]struct{} {
 	res := make(map[string]struct{})
 	for _, pair := range strings.Split(params, "&") {
-		if strings.Contains(pair, "=") {
-			parts := strings.SplitN(pair, "=", 2)
-			key := parts[0]
-			if key != "" {
-				res[key] = struct{}{}
-			}
+		if pair == "" {
+			continue
+		}
+		parts := strings.SplitN(pair, "=", 2)
+		key := parts[0]
+		if key != "" {
+			res[key] = struct{}{}
 		}
 	}
 	return res
@@ -71,7 +72,7 @@ func hasBadExtension(pathStr string) bool {
 // legitimate endpoints like /wp-admin/admin-ajax.php.
 func isContentPath(pathStr string) bool {
 	for _, part := range strings.Split(pathStr, "/") {
-		if strings.Count(part, "-") > 4 {
+		if strings.Count(part, "-") > 3 {
 			return true
 		}
 	}
