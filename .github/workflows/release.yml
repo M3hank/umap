@@ -1,0 +1,41 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    name: Build & Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    strategy:
+      matrix:
+        goos: [linux, windows, darwin]
+        goarch: [amd64, arm64]
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Build Binary
+        run: |
+          ext=""
+          if [ "${{ matrix.goos }}" = "windows" ]; then ext=".exe"; fi
+          binary_name="umap-${{ matrix.goos }}-${{ matrix.goarch }}$ext"
+          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -o $binary_name .
+          echo "BINARY_NAME=$binary_name" >> $GITHUB_ENV
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.BINARY_NAME }}
+          generate_release_notes: true
