@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path"
@@ -12,7 +13,6 @@ import (
 )
 
 var (
-	urlMappings      = make(map[string]map[string]map[string]string)
 	staticExtensions = map[string]struct{}{
 		"css": {}, "svg": {}, "png": {}, "mp3": {}, "jpg": {}, "pdf": {},
 		"woff2": {}, "bmp": {}, "ico": {}, "mp4": {}, "woff": {}, "jpeg": {},
@@ -49,12 +49,9 @@ func paramNamesToString(paramNames map[string]struct{}) string {
 	return strings.Join(keys, "&")
 }
 
-// hasBadExtension checks if the URL path (ignoring query/fragment) has a static file extension.
+// hasBadExtension checks if the URL path has a static file extension.
 func hasBadExtension(pathStr string) bool {
-	// Use only the path portion — strip any potential query string remnants
-	// path.Ext operates on the last element, so we just need the clean path segment
 	base := path.Base(pathStr)
-	// Strip anything after '?' in case the path itself somehow carries it
 	if idx := strings.Index(base, "?"); idx != -1 {
 		base = base[:idx]
 	}
@@ -67,87 +64,81 @@ func hasBadExtension(pathStr string) bool {
 	return exists
 }
 
-// isContentPath returns true if any path segment looks like a UUID / slug
-// (more than 4 hyphens). A threshold of 3 was too aggressive and discarded
-// legitimate endpoints like /wp-admin/admin-ajax.php.
-func isContentPath(pathStr string) bool {
-	for _, part := range strings.Split(pathStr, "/") {
+// normalizePathForDedup replaces UUIDs and long slugs in the path with a placeholder
+// so that similar endpoints (e.g., /user/UUID1 and /user/UUID2) deduplicate down
+// to a single representative URL instead of completely dropping them.
+func normalizePathForDedup(pathStr string) string {
+	parts := strings.Split(pathStr, "/")
+	modified := false
+	for i, part := range parts {
+		// If a path segment has 4 or more hyphens, treat it as a UUID or slug
 		if strings.Count(part, "-") > 3 {
-			return true
+			parts[i] = "{slug}"
+			modified = true
 		}
 	}
-	return false
+	if !modified {
+		return pathStr
+	}
+	return strings.Join(parts, "/")
 }
 
 func main() {
 	flag.Parse()
 
-	// BUG FIX: Use a larger scanner buffer so very long lines are not silently dropped.
-	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1 MB per line
+	// Use bufio.Reader so arbitrarily long lines are processed without buffer size limits or drops.
+	reader := bufio.NewReader(os.Stdin)
 
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
+	// Preserve insertion order for deterministic output across runs
+	var outputURLs []string
+	seenKeys := make(map[string]struct{})
+
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil && err != io.EOF {
+			fmt.Fprintf(os.Stderr, "umap: error reading input: %v\n", err)
+			os.Exit(1)
 		}
 
-		// BUG FIX: Prepend scheme BEFORE parsing, not after.
-		// url.Parse on a scheme-less string like "www.example.com/path"
-		// treats the entire string as a path, leaving Host empty.
-		if !strings.Contains(line, "://") {
-			line = "http://" + line
-		}
+		line = strings.TrimSpace(line)
+		if line != "" {
+			// Handle scheme-less and protocol-relative URLs
+			if strings.HasPrefix(line, "//") {
+				line = "http:" + line
+			} else if !strings.Contains(line, "://") {
+				line = "http://" + line
+			}
 
-		parsed, err := url.Parse(line)
-		if err != nil {
-			continue
-		}
+			parsed, parseErr := url.Parse(line)
+			if parseErr == nil && parsed.Host != "" {
+				host := parsed.Scheme + "://" + parsed.Host
+				if parsed.Path == "" {
+					parsed.Path = "/"
+				}
+				pathStr := parsed.Path
 
-		// BUG FIX: Skip URLs that have no host after parsing (e.g. bare relative paths).
-		if parsed.Host == "" {
-			continue
-		}
+				if !hasBadExtension(pathStr) {
+					paramNames := parametersToNameSet(parsed.RawQuery)
+					paramNamesStr := paramNamesToString(paramNames)
 
-		host := parsed.Scheme + "://" + parsed.Host
-		if _, exists := urlMappings[host]; !exists {
-			urlMappings[host] = make(map[string]map[string]string)
-		}
-
-		pathStr := parsed.Path
-		if hasBadExtension(pathStr) || isContentPath(pathStr) {
-			continue
-		}
-
-		paramNames := parametersToNameSet(parsed.RawQuery)
-		paramNamesStr := paramNamesToString(paramNames)
-		if *parametersFlag && paramNamesStr == "" {
-			// Skip URLs without parameters when -params flag is set
-			continue
-		}
-
-		if _, exists := urlMappings[host][pathStr]; !exists {
-			urlMappings[host][pathStr] = make(map[string]string)
-		}
-		// Use paramNamesStr as key for deduplication
-		if _, exists := urlMappings[host][pathStr][paramNamesStr]; !exists {
-			// Store the full URL (including parameter values) for output
-			fullURL := parsed.String()
-			urlMappings[host][pathStr][paramNamesStr] = fullURL
-		}
-	}
-
-	// BUG FIX: Check scanner error — previously silently ignored read failures.
-	if err := scanner.Err(); err != nil {
-		fmt.Fprintf(os.Stderr, "umap: error reading input: %v\n", err)
-		os.Exit(1)
-	}
-
-	for _, paths := range urlMappings {
-		for _, paramMap := range paths {
-			for _, fullURL := range paramMap {
-				fmt.Println(fullURL)
+					if !(*parametersFlag && paramNamesStr == "") {
+						dedupPath := normalizePathForDedup(pathStr)
+						dedupKey := host + "|" + dedupPath + "|" + paramNamesStr
+						if _, exists := seenKeys[dedupKey]; !exists {
+							seenKeys[dedupKey] = struct{}{}
+							outputURLs = append(outputURLs, parsed.String())
+						}
+					}
+				}
 			}
 		}
+
+		if err == io.EOF {
+			break
+		}
+	}
+
+	for _, fullURL := range outputURLs {
+		fmt.Println(fullURL)
 	}
 }
